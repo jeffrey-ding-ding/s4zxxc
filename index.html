@@ -1,0 +1,1291 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>💥 爆炸模拟</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        html,
+        body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #000;
+            cursor: crosshair;
+            -webkit-user-select: none;
+            user-select: none;
+            -webkit-tap-highlight-color: transparent;
+            overscroll-behavior: none;
+            touch-action: none;
+        }
+        canvas {
+            display: block;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+        }
+
+        /* 屏幕震动动画 */
+        @keyframes screenShake {
+            0% {
+                transform: translate(0, 0) scale(1);
+            }
+            10% {
+                transform: translate(-8px, 6px) scale(1.005);
+            }
+            20% {
+                transform: translate(10px, -7px) scale(1.01);
+            }
+            30% {
+                transform: translate(-12px, 5px) scale(1.008);
+            }
+            40% {
+                transform: translate(9px, 8px) scale(1.012);
+            }
+            50% {
+                transform: translate(-6px, -9px) scale(1.006);
+            }
+            60% {
+                transform: translate(7px, 4px) scale(1.01);
+            }
+            70% {
+                transform: translate(-5px, -3px) scale(1.004);
+            }
+            80% {
+                transform: translate(3px, 2px) scale(1.002);
+            }
+            90% {
+                transform: translate(-2px, -1px) scale(1.001);
+            }
+            100% {
+                transform: translate(0, 0) scale(1);
+            }
+        }
+        .shake-hard {
+            animation: screenShake 0.6s ease-out both;
+        }
+        @keyframes screenShakeSoft {
+            0% {
+                transform: translate(0, 0);
+            }
+            25% {
+                transform: translate(-4px, 3px);
+            }
+            50% {
+                transform: translate(3px, -2px);
+            }
+            75% {
+                transform: translate(-2px, 1px);
+            }
+            100% {
+                transform: translate(0, 0);
+            }
+        }
+        .shake-soft {
+            animation: screenShakeSoft 0.4s ease-out both;
+        }
+
+        /* 闪光覆盖层 */
+        #flashOverlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: #fff;
+            z-index: 10;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.05s ease-out;
+        }
+        #flashOverlay.active {
+            opacity: 1;
+            transition: opacity 0.08s ease-out;
+        }
+
+        /* 暖光覆盖层 */
+        #warmGlow {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 5;
+            pointer-events: none;
+            background: radial-gradient(ellipse at center, rgba(255, 160, 40, 0.35) 0%, rgba(255, 80, 10, 0.15) 35%, rgba(0, 0, 0, 0) 70%);
+            opacity: 0;
+            transition: opacity 0.3s ease-out;
+        }
+        #warmGlow.active {
+            opacity: 1;
+            transition: opacity 0.5s ease-out;
+        }
+
+        /* 暗角 */
+        #vignette {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 6;
+            pointer-events: none;
+            background: radial-gradient(ellipse at center, rgba(0, 0, 0, 0) 50%, rgba(0, 0, 0, 0.7) 100%);
+        }
+    </style>
+</head>
+<body>
+
+    <canvas id="explosionCanvas"></canvas>
+    <div id="flashOverlay"></div>
+    <div id="warmGlow"></div>
+    <div id="vignette"></div>
+
+    <script>
+        (function() {
+            // ==================== 初始化 Canvas ====================
+            const canvas = document.getElementById('explosionCanvas');
+            const ctx = canvas.getContext('2d', { alpha: false });
+            const flashOverlay = document.getElementById('flashOverlay');
+            const warmGlow = document.getElementById('warmGlow');
+
+            let W, H, DPR;
+
+            function resizeCanvas() {
+                DPR = Math.min(window.devicePixelRatio || 1, 2);
+                W = window.innerWidth;
+                H = window.innerHeight;
+                canvas.width = W * DPR;
+                canvas.height = H * DPR;
+                canvas.style.width = W + 'px';
+                canvas.style.height = H + 'px';
+                ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+            }
+            resizeCanvas();
+            window.addEventListener('resize', resizeCanvas);
+
+            // ==================== 常量 ====================
+            const GROUND_Y = H * 0.88;
+            const EXPLOSION_X = W * 0.5;
+            const EXPLOSION_Y = H * 0.52;
+            const MAX_FIREBALL_RADIUS = Math.min(W, H) * 0.38;
+            const MAX_SHOCKWAVE_RADIUS = Math.max(W, H) * 0.85;
+
+            // ==================== 音效系统 ====================
+            let audioCtx = null;
+            let audioReady = false;
+            let secondaryExplosionTriggered = false;
+
+            function initAudio() {
+                if (audioCtx) return;
+                try {
+                    const AC = window.AudioContext || window.webkitAudioContext;
+                    audioCtx = new AC();
+                    audioReady = true;
+                } catch (e) {
+                    console.warn('Web Audio API not available');
+                }
+            }
+
+            function createNoiseBuffer(duration, sampleRate) {
+                const bufferSize = Math.floor(sampleRate * duration);
+                const buffer = audioCtx.createBuffer(1, bufferSize, sampleRate);
+                const data = buffer.getChannelData(0);
+                for (let i = 0; i < bufferSize; i++) {
+                    data[i] = Math.random() * 2 - 1;
+                }
+                return buffer;
+            }
+
+            function createExplosionSound() {
+                if (!audioCtx || !audioReady) return;
+                const now = audioCtx.currentTime;
+                const sampleRate = audioCtx.sampleRate;
+
+                // --- 主爆炸噪声 ---
+                const noiseDuration = 2.5;
+                const noiseBuffer = createNoiseBuffer(noiseDuration, sampleRate);
+                const noiseSource = audioCtx.createBufferSource();
+                noiseSource.buffer = noiseBuffer;
+                noiseSource.loop = true;
+
+                // 低通滤波器 - 频率快速下降
+                const lowpass = audioCtx.createBiquadFilter();
+                lowpass.type = 'lowpass';
+                lowpass.frequency.setValueAtTime(8000, now);
+                lowpass.frequency.exponentialRampToValueAtTime(300, now + 0.8);
+                lowpass.frequency.exponentialRampToValueAtTime(80, now + 2.0);
+                lowpass.Q.setValueAtTime(0.7, now);
+
+                // 高通滤波器 - 移除超低频
+                const highpass = audioCtx.createBiquadFilter();
+                highpass.type = 'highpass';
+                highpass.frequency.setValueAtTime(30, now);
+                highpass.frequency.exponentialRampToValueAtTime(50, now + 0.5);
+                highpass.Q.setValueAtTime(0.5, now);
+
+                // 增益包络
+                const noiseGain = audioCtx.createGain();
+                noiseGain.gain.setValueAtTime(1.0, now);
+                noiseGain.gain.exponentialRampToValueAtTime(0.35, now + 0.15);
+                noiseGain.gain.exponentialRampToValueAtTime(0.08, now + 0.6);
+                noiseGain.gain.exponentialRampToValueAtTime(0.01, now + 2.0);
+                noiseGain.gain.linearRampToValueAtTime(0, now + 2.5);
+
+                noiseSource.connect(highpass);
+                highpass.connect(lowpass);
+                lowpass.connect(noiseGain);
+                noiseGain.connect(audioCtx.destination);
+                noiseSource.start(now);
+                noiseSource.stop(now + 2.5);
+
+                // --- 低频轰鸣 ---
+                const osc1 = audioCtx.createOscillator();
+                osc1.type = 'sine';
+                osc1.frequency.setValueAtTime(100, now);
+                osc1.frequency.exponentialRampToValueAtTime(28, now + 1.2);
+                const osc1Gain = audioCtx.createGain();
+                osc1Gain.gain.setValueAtTime(0.9, now);
+                osc1Gain.gain.exponentialRampToValueAtTime(0.3, now + 0.3);
+                osc1Gain.gain.exponentialRampToValueAtTime(0.02, now + 1.5);
+                osc1Gain.gain.linearRampToValueAtTime(0, now + 2.0);
+                osc1.connect(osc1Gain);
+                osc1Gain.connect(audioCtx.destination);
+                osc1.start(now);
+                osc1.stop(now + 2.0);
+
+                // --- 次声波脉冲 ---
+                const osc2 = audioCtx.createOscillator();
+                osc2.type = 'sine';
+                osc2.frequency.setValueAtTime(35, now);
+                osc2.frequency.exponentialRampToValueAtTime(15, now + 1.0);
+                const osc2Gain = audioCtx.createGain();
+                osc2Gain.gain.setValueAtTime(0.5, now);
+                osc2Gain.gain.exponentialRampToValueAtTime(0.1, now + 0.4);
+                osc2Gain.gain.linearRampToValueAtTime(0, now + 1.2);
+                osc2.connect(osc2Gain);
+                osc2Gain.connect(audioCtx.destination);
+                osc2.start(now);
+                osc2.stop(now + 1.2);
+
+                // --- 冲击波尖锐噪声 ---
+                const crackBuffer = createNoiseBuffer(0.35, sampleRate);
+                const crackSource = audioCtx.createBufferSource();
+                crackSource.buffer = crackBuffer;
+                const crackFilter = audioCtx.createBiquadFilter();
+                crackFilter.type = 'bandpass';
+                crackFilter.frequency.setValueAtTime(3500, now);
+                crackFilter.frequency.exponentialRampToValueAtTime(800, now + 0.3);
+                crackFilter.Q.setValueAtTime(1.0, now);
+                const crackGain = audioCtx.createGain();
+                crackGain.gain.setValueAtTime(0.7, now);
+                crackGain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
+                crackGain.gain.linearRampToValueAtTime(0, now + 0.35);
+                crackSource.connect(crackFilter);
+                crackFilter.connect(crackGain);
+                crackGain.connect(audioCtx.destination);
+                crackSource.start(now + 0.05);
+                crackSource.stop(now + 0.4);
+
+                // --- 回声 ---
+                const delayNode = audioCtx.createDelay(2.0);
+                delayNode.delayTime.setValueAtTime(0.45, now);
+                const feedbackGain = audioCtx.createGain();
+                feedbackGain.gain.setValueAtTime(0.3, now);
+                const echoGain = audioCtx.createGain();
+                echoGain.gain.setValueAtTime(0.35, now);
+                echoGain.gain.exponentialRampToValueAtTime(0.01, now + 1.5);
+
+                lowpass.connect(delayNode);
+                delayNode.connect(feedbackGain);
+                feedbackGain.connect(delayNode);
+                delayNode.connect(echoGain);
+                echoGain.connect(audioCtx.destination);
+
+                // --- 碎片飞溅声 ---
+                for (let i = 0; i < 12; i++) {
+                    const splashDelay = 0.15 + Math.random() * 1.2;
+                    const splashDur = 0.03 + Math.random() * 0.08;
+                    const splashBuffer = createNoiseBuffer(splashDur + 0.05, sampleRate);
+                    const splashSource = audioCtx.createBufferSource();
+                    splashSource.buffer = splashBuffer;
+                    const splashFilter = audioCtx.createBiquadFilter();
+                    splashFilter.type = 'bandpass';
+                    splashFilter.frequency.setValueAtTime(2000 + Math.random() * 3000, now + splashDelay);
+                    splashFilter.Q.setValueAtTime(2.0, now + splashDelay);
+                    const splashGain = audioCtx.createGain();
+                    splashGain.gain.setValueAtTime(0.03 + Math.random() * 0.08, now + splashDelay);
+                    splashGain.gain.exponentialRampToValueAtTime(0.001, now + splashDelay + splashDur);
+                    splashSource.connect(splashFilter);
+                    splashFilter.connect(splashGain);
+                    splashGain.connect(audioCtx.destination);
+                    splashSource.start(now + splashDelay);
+                    splashSource.stop(now + splashDelay + splashDur + 0.05);
+                }
+            }
+
+            function playExplosionSound() {
+                if (!audioCtx) {
+                    initAudio();
+                }
+                if (audioCtx && audioReady) {
+                    if (audioCtx.state === 'suspended') {
+                        audioCtx.resume().then(() => {
+                            createExplosionSound();
+                        }).catch(() => {});
+                    } else {
+                        createExplosionSound();
+                    }
+                }
+            }
+
+            function playSecondaryBoomSound() {
+                if (!audioCtx || !audioReady) return;
+                const now = audioCtx.currentTime;
+                const sampleRate = audioCtx.sampleRate;
+                const buf = createNoiseBuffer(0.5, sampleRate);
+                const src = audioCtx.createBufferSource();
+                src.buffer = buf;
+                const filter = audioCtx.createBiquadFilter();
+                filter.type = 'lowpass';
+                filter.frequency.setValueAtTime(2000, now);
+                filter.frequency.exponentialRampToValueAtTime(200, now + 0.4);
+                const gain = audioCtx.createGain();
+                gain.gain.setValueAtTime(0.5, now);
+                gain.gain.exponentialRampToValueAtTime(0.01, now + 0.5);
+                src.connect(filter);
+                filter.connect(gain);
+                gain.connect(audioCtx.destination);
+                src.start(now);
+                src.stop(now + 0.5);
+
+                const osc = audioCtx.createOscillator();
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(60, now);
+                osc.frequency.exponentialRampToValueAtTime(20, now + 0.6);
+                const og = audioCtx.createGain();
+                og.gain.setValueAtTime(0.4, now);
+                og.gain.exponentialRampToValueAtTime(0.01, now + 0.7);
+                osc.connect(og);
+                og.connect(audioCtx.destination);
+                osc.start(now);
+                osc.stop(now + 0.7);
+            }
+
+            // ==================== 粒子系统 ====================
+            let particles = [];
+            let debris = [];
+            let smokeParticles = [];
+            let embers = [];
+            let fireParticles = [];
+            let groundFires = [];
+            let shockwaves = [];
+            let dustParticles = [];
+            let fireballActive = true;
+
+            // 爆炸状态
+            let explosionTime = 0;
+            let explosionDuration = 5.0;
+            let initialFlashIntensity = 0;
+            let screenShakeIntensity = 0;
+            let fireballRadius = 0;
+            let fireballMaxRadiusReached = false;
+            let fireballFadeStart = 0;
+            let craterFormed = false;
+            let secondaryBoomDone = false;
+
+            // ==================== 工具函数 ====================
+            function lerp(a, b, t) { return a + (b - a) * t; }
+
+            function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
+
+            function easeOutExpo(t) { return t >= 1 ? 1 : 1 - Math.pow(2, -10 * t); }
+
+            function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+            function easeInCubic(t) { return t * t * t; }
+
+            function rand(min, max) { return Math.random() * (max - min) + min; }
+
+            function randInt(min, max) { return Math.floor(rand(min, max)); }
+
+            function dist(x1, y1, x2, y2) { return Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2); }
+
+            function angle(x1, y1, x2, y2) { return Math.atan2(y2 - y1, x2 - x1); }
+
+            function heatColor(t) {
+                // t: 0=最热(白) -> 1=冷却(暗红)
+                t = clamp(t, 0, 1);
+                if (t < 0.15) {
+                    const k = t / 0.15;
+                    return { r: 255, g: 255, b: Math.floor(lerp(240, 200, k)), a: 1 };
+                } else if (t < 0.35) {
+                    const k = (t - 0.15) / 0.2;
+                    return { r: 255, g: Math.floor(lerp(255, 180, k)), b: Math.floor(lerp(200, 50, k)), a: 1 };
+                } else if (t < 0.6) {
+                    const k = (t - 0.35) / 0.25;
+                    return { r: Math.floor(lerp(255, 180, k)), g: Math.floor(lerp(180, 60, k)), b: Math.floor(lerp(50, 15, k)),
+                        a: 1 };
+                } else if (t < 0.85) {
+                    const k = (t - 0.6) / 0.25;
+                    return { r: Math.floor(lerp(180, 90, k)), g: Math.floor(lerp(60, 25, k)), b: Math.floor(lerp(15, 8, k)),
+                        a: 1 };
+                } else {
+                    const k = (t - 0.85) / 0.15;
+                    return { r: Math.floor(lerp(90, 40, k)), g: Math.floor(lerp(25, 12, k)), b: Math.floor(lerp(8, 5, k)),
+                        a: 1 - k * 0.5 };
+                }
+            }
+
+            function rgbaStr(c, alpha) {
+                return `rgba(${c.r},${c.g},${c.b},${alpha !== undefined ? alpha : c.a})`;
+            }
+
+            // ==================== 创建碎片 ====================
+            function createDebris(count) {
+                for (let i = 0; i < count; i++) {
+                    const size = rand(2, 12);
+                    const speed = rand(80, 750) * (12 / (size + 3));
+                    const ang = rand(0, Math.PI * 2);
+                    const numVerts = randInt(3, 7);
+                    const verts = [];
+                    for (let v = 0; v < numVerts; v++) {
+                        const vAng = (v / numVerts) * Math.PI * 2 + rand(-0.3, 0.3);
+                        const vRad = size * rand(0.6, 1.3);
+                        verts.push({ x: Math.cos(vAng) * vRad, y: Math.sin(vAng) * vRad });
+                    }
+                    const upBias = rand(-0.3, 0.8);
+                    debris.push({
+                        x: EXPLOSION_X + rand(-5, 5),
+                        y: EXPLOSION_Y + rand(-5, 5),
+                        vx: Math.cos(ang) * speed * 0.7,
+                        vy: Math.sin(ang) * speed * 0.6 - speed * upBias * 0.3,
+                        rotation: rand(0, Math.PI * 2),
+                        angularVel: rand(-8, 8),
+                        size: size,
+                        verts: verts,
+                        age: 0,
+                        life: rand(2.5, 5.0),
+                        color: heatColor(rand(0.05, 0.35)),
+                        grounded: false,
+                        bounceCount: 0,
+                        gravity: rand(180, 420),
+                        drag: rand(0.985, 0.998),
+                    });
+                }
+            }
+
+            // ==================== 创建烟雾 ====================
+            function createSmoke(count) {
+                for (let i = 0; i < count; i++) {
+                    const ang = rand(0, Math.PI * 2);
+                    const spd = rand(20, 140);
+                    smokeParticles.push({
+                        x: EXPLOSION_X + Math.cos(ang) * rand(5, 40),
+                        y: EXPLOSION_Y + Math.sin(ang) * rand(5, 30) - rand(0, 30),
+                        vx: Math.cos(ang) * spd * 0.4 + rand(-10, 10),
+                        vy: rand(-120, -40) - spd * 0.2,
+                        radius: rand(15, 45),
+                        age: 0,
+                        life: rand(3.0, 6.0),
+                        alpha: rand(0.3, 0.65),
+                        colorBase: { r: rand(40, 80), g: rand(35, 65), b: rand(30, 55) },
+                    });
+                }
+            }
+
+            // ==================== 创建余烬 ====================
+            function createEmbers(count) {
+                for (let i = 0; i < count; i++) {
+                    const ang = rand(0, Math.PI * 2);
+                    const spd = rand(60, 380);
+                    embers.push({
+                        x: EXPLOSION_X + Math.cos(ang) * rand(5, 30),
+                        y: EXPLOSION_Y + Math.sin(ang) * rand(5, 30),
+                        vx: Math.cos(ang) * spd * rand(0.5, 1.2) + rand(-20, 20),
+                        vy: Math.sin(ang) * spd * rand(0.5, 1.2) - rand(0, 150),
+                        size: rand(1.5, 4.5),
+                        age: 0,
+                        life: rand(1.5, 4.5),
+                        flickerSpeed: rand(8, 20),
+                        flickerPhase: rand(0, Math.PI * 2),
+                        gravity: rand(50, 150),
+                        drag: rand(0.99, 0.998),
+                    });
+                }
+            }
+
+            // ==================== 创建火球粒子（炽热气体） ====================
+            function createFireballParticles(count) {
+                for (let i = 0; i < count; i++) {
+                    const ang = rand(0, Math.PI * 2);
+                    const spd = rand(20, 180);
+                    fireParticles.push({
+                        x: EXPLOSION_X + Math.cos(ang) * rand(2, 20),
+                        y: EXPLOSION_Y + Math.sin(ang) * rand(2, 20),
+                        vx: Math.cos(ang) * spd + rand(-15, 15),
+                        vy: Math.sin(ang) * spd * 0.7 - rand(10, 80),
+                        radius: rand(5, 25),
+                        age: 0,
+                        life: rand(0.5, 2.5),
+                        alpha: rand(0.5, 0.9),
+                        colorHeat: rand(0.05, 0.45),
+                        drag: rand(0.97, 0.995),
+                    });
+                }
+            }
+
+            // ==================== 创建地面火焰 ====================
+            function createGroundFires(count) {
+                for (let i = 0; i < count; i++) {
+                    const offsetX = rand(-80, 80);
+                    groundFires.push({
+                        x: EXPLOSION_X + offsetX,
+                        y: GROUND_Y + rand(-8, 5),
+                        radius: rand(5, 18),
+                        age: 0,
+                        life: rand(2.0, 8.0),
+                        flickerSpeed: rand(5, 15),
+                        flickerPhase: rand(0, Math.PI * 2),
+                        baseAlpha: rand(0.4, 0.8),
+                    });
+                }
+            }
+
+            // ==================== 创建灰尘 ====================
+            function createDust(count) {
+                for (let i = 0; i < count; i++) {
+                    const ang = rand(0, Math.PI * 2);
+                    const spd = rand(15, 90);
+                    dustParticles.push({
+                        x: EXPLOSION_X + Math.cos(ang) * rand(10, 60),
+                        y: GROUND_Y + rand(-15, 10),
+                        vx: Math.cos(ang) * spd + rand(-5, 5),
+                        vy: rand(-60, -10),
+                        radius: rand(8, 35),
+                        age: 0,
+                        life: rand(3.5, 7.0),
+                        alpha: rand(0.15, 0.4),
+                        color: { r: rand(90, 140), g: rand(75, 115), b: rand(60, 90) },
+                        drag: rand(0.99, 0.997),
+                    });
+                }
+            }
+
+            // ==================== 创建冲击波 ====================
+            function createShockwave() {
+                shockwaves.push({
+                    x: EXPLOSION_X,
+                    y: EXPLOSION_Y,
+                    radius: 0,
+                    maxRadius: MAX_SHOCKWAVE_RADIUS,
+                    speed: Math.min(W, H) * 4.5,
+                    lineWidth: 25,
+                    age: 0,
+                    life: 0.8,
+                    alpha: 0.95,
+                });
+            }
+
+            // ==================== 主爆炸触发 ====================
+            function triggerExplosion() {
+                explosionTime = 0;
+                explosionDuration = 5.5;
+                fireballActive = true;
+                fireballMaxRadiusReached = false;
+                fireballFadeStart = 0;
+                initialFlashIntensity = 1.0;
+                screenShakeIntensity = 1.0;
+                craterFormed = false;
+                secondaryBoomDone = false;
+
+                // 清空旧粒子
+                particles = [];
+                debris = [];
+                smokeParticles = [];
+                embers = [];
+                fireParticles = [];
+                groundFires = [];
+                shockwaves = [];
+                dustParticles = [];
+
+                // 初始创建
+                createDebris(65);
+                createSmoke(30);
+                createEmbers(80);
+                createFireballParticles(200);
+                createShockwave();
+
+                // 屏幕震动
+                document.body.classList.remove('shake-hard', 'shake-soft');
+                void document.body.offsetWidth;
+                document.body.classList.add('shake-hard');
+
+                // 闪光
+                flashOverlay.classList.add('active');
+                warmGlow.classList.add('active');
+
+                // 音效
+                playExplosionSound();
+
+                // 短暂延迟后创建地面火焰
+                setTimeout(() => {
+                    createGroundFires(25);
+                    createDust(30);
+                }, 150);
+
+                // 延迟移除闪光
+                setTimeout(() => {
+                    flashOverlay.classList.remove('active');
+                }, 120);
+            }
+
+            // ==================== 次级爆炸（用户交互时） ====================
+            function triggerSecondaryExplosion() {
+                if (secondaryBoomDone) return;
+                secondaryBoomDone = true;
+                playSecondaryBoomSound();
+
+                // 小规模冲击波
+                shockwaves.push({
+                    x: EXPLOSION_X + rand(-30, 30),
+                    y: EXPLOSION_Y + rand(-20, 20),
+                    radius: 10,
+                    maxRadius: MAX_SHOCKWAVE_RADIUS * 0.5,
+                    speed: Math.min(W, H) * 3.0,
+                    lineWidth: 12,
+                    age: 0,
+                    life: 0.5,
+                    alpha: 0.6,
+                });
+
+                // 额外碎片和火星
+                createDebris(20);
+                createEmbers(30);
+                createFireballParticles(60);
+                createSmoke(10);
+
+                // 额外闪光
+                flashOverlay.classList.add('active');
+                setTimeout(() => { flashOverlay.classList.remove('active'); }, 80);
+
+                // 轻微震动
+                document.body.classList.remove('shake-soft');
+                void document.body.offsetWidth;
+                document.body.classList.add('shake-soft');
+            }
+
+            // ==================== 更新函数 ====================
+            function updateExplosion(dt) {
+                if (explosionTime >= explosionDuration) return;
+                explosionTime += dt;
+                const t = explosionTime;
+
+                // 火球半径更新
+                if (t < 0.3) {
+                    const k = easeOutCubic(t / 0.3);
+                    fireballRadius = MAX_FIREBALL_RADIUS * k;
+                } else if (t < 0.6) {
+                    fireballRadius = MAX_FIREBALL_RADIUS * (1 - (t - 0.3) / 0.3 * 0.15);
+                } else if (t < 1.2) {
+                    const k = (t - 0.6) / 0.6;
+                    fireballRadius = MAX_FIREBALL_RADIUS * 0.85 * (1 - k * 0.4);
+                } else {
+                    const k = (t - 1.2) / 2.0;
+                    fireballRadius = MAX_FIREBALL_RADIUS * 0.51 * (1 - k * 0.85);
+                    fireballActive = fireballRadius > 10;
+                }
+
+                // 初始闪光衰减
+                if (initialFlashIntensity > 0) {
+                    initialFlashIntensity = Math.max(0, 1.0 - t * 8);
+                }
+
+                // 屏幕震动衰减
+                screenShakeIntensity = Math.max(0, 1.0 - t * 1.8);
+
+                // 弹坑形成
+                if (t > 0.15 && !craterFormed) {
+                    craterFormed = true;
+                }
+
+                // 更新碎片
+                for (let i = debris.length - 1; i >= 0; i--) {
+                    const d = debris[i];
+                    d.age += dt;
+                    if (d.age > d.life || d.y > H + 50 || d.x < -100 || d.x > W + 100) {
+                        debris.splice(i, 1);
+                        continue;
+                    }
+                    if (!d.grounded) {
+                        d.vx *= d.drag;
+                        d.vy = d.vy * d.drag + d.gravity * dt;
+                        d.x += d.vx * dt;
+                        d.y += d.vy * dt;
+                        d.rotation += d.angularVel * dt;
+                        // 地面碰撞
+                        if (d.y >= GROUND_Y - d.size * 0.3 && d.vy > 0) {
+                            if (d.bounceCount < 2) {
+                                d.y = GROUND_Y - d.size * 0.3;
+                                d.vy = -d.vy * rand(0.2, 0.45);
+                                d.vx *= 0.5;
+                                d.angularVel *= 0.6;
+                                d.bounceCount++;
+                            } else {
+                                d.grounded = true;
+                                d.y = GROUND_Y - d.size * 0.3;
+                                d.vx = 0;
+                                d.vy = 0;
+                                d.angularVel = 0;
+                            }
+                        }
+                    }
+                    // 颜色冷却
+                    const heatT = clamp(d.age / d.life, 0, 1);
+                    d.color = heatColor(0.05 + heatT * 0.75);
+                }
+
+                // 更新烟雾
+                for (let i = smokeParticles.length - 1; i >= 0; i--) {
+                    const s = smokeParticles[i];
+                    s.age += dt;
+                    if (s.age > s.life) {
+                        smokeParticles.splice(i, 1);
+                        continue;
+                    }
+                    s.x += s.vx * dt;
+                    s.y += s.vy * dt;
+                    s.vy -= 25 * dt;
+                    s.vx *= 0.995;
+                    s.radius += 12 * dt;
+                    const lifeK = s.age / s.life;
+                    s.alpha = s.alpha * (1 - lifeK * 0.85);
+                }
+
+                // 更新余烬
+                for (let i = embers.length - 1; i >= 0; i--) {
+                    const e = embers[i];
+                    e.age += dt;
+                    if (e.age > e.life || e.y > H + 20) {
+                        embers.splice(i, 1);
+                        continue;
+                    }
+                    e.vx *= e.drag;
+                    e.vy = e.vy * e.drag + e.gravity * dt;
+                    e.x += e.vx * dt;
+                    e.y += e.vy * dt;
+                }
+
+                // 更新火球粒子
+                for (let i = fireParticles.length - 1; i >= 0; i--) {
+                    const f = fireParticles[i];
+                    f.age += dt;
+                    if (f.age > f.life) {
+                        fireParticles.splice(i, 1);
+                        continue;
+                    }
+                    f.vx *= f.drag;
+                    f.vy = f.vy * f.drag - 30 * dt;
+                    f.x += f.vx * dt;
+                    f.y += f.vy * dt;
+                    f.radius *= (1 - dt * 0.4);
+                    const lifeK = f.age / f.life;
+                    f.alpha = f.alpha * (1 - lifeK * 0.9);
+                    f.colorHeat = 0.05 + lifeK * 0.8;
+                }
+
+                // 更新地面火焰
+                for (let i = groundFires.length - 1; i >= 0; i--) {
+                    const g = groundFires[i];
+                    g.age += dt;
+                    if (g.age > g.life) {
+                        groundFires.splice(i, 1);
+                        continue;
+                    }
+                }
+
+                // 更新冲击波
+                for (let i = shockwaves.length - 1; i >= 0; i--) {
+                    const sw = shockwaves[i];
+                    sw.age += dt;
+                    if (sw.age > sw.life) {
+                        shockwaves.splice(i, 1);
+                        continue;
+                    }
+                    sw.radius += sw.speed * dt;
+                    const lifeK = sw.age / sw.life;
+                    sw.alpha = sw.alpha * (1 - lifeK);
+                    sw.lineWidth = sw.lineWidth * (1 - lifeK * 0.85);
+                }
+
+                // 更新灰尘
+                for (let i = dustParticles.length - 1; i >= 0; i--) {
+                    const dp = dustParticles[i];
+                    dp.age += dt;
+                    if (dp.age > dp.life) {
+                        dustParticles.splice(i, 1);
+                        continue;
+                    }
+                    dp.vx *= dp.drag;
+                    dp.vy = dp.vy * dp.drag - 10 * dt;
+                    dp.x += dp.vx * dt;
+                    dp.y += dp.vy * dt;
+                    dp.radius += 8 * dt;
+                    const lifeK = dp.age / dp.life;
+                    dp.alpha = dp.alpha * (1 - lifeK * 0.8);
+                }
+
+                // 持续添加烟雾（爆炸初期）
+                if (t < 2.5 && Math.random() < 0.6) {
+                    createSmoke(2);
+                }
+                // 持续添加余烬
+                if (t < 3.0 && Math.random() < 0.5) {
+                    createEmbers(2);
+                }
+                // 持续添加火球粒子（火球活跃期）
+                if (fireballActive && t < 1.5 && Math.random() < 0.7) {
+                    createFireballParticles(3);
+                }
+            }
+
+            // ==================== 渲染函数 ====================
+            function renderExplosion() {
+                // 清除
+                ctx.fillStyle = '#0a0a0c';
+                ctx.fillRect(0, 0, W, H);
+
+                // 屏幕震动偏移
+                let shakeX = 0,
+                    shakeY = 0;
+                if (screenShakeIntensity > 0.01) {
+                    const intensity = screenShakeIntensity * 16;
+                    shakeX = (Math.random() - 0.5) * 2 * intensity;
+                    shakeY = (Math.random() - 0.5) * 2 * intensity;
+                }
+
+                ctx.save();
+                ctx.translate(shakeX, shakeY);
+
+                // ===== 绘制背景渐变 =====
+                const bgGrad = ctx.createLinearGradient(0, 0, 0, GROUND_Y + 20);
+                bgGrad.addColorStop(0, '#0d0d12');
+                bgGrad.addColorStop(0.55, '#14141a');
+                bgGrad.addColorStop(1, '#1a1512');
+                ctx.fillStyle = bgGrad;
+                ctx.fillRect(-20, -20, W + 40, GROUND_Y + 30);
+
+                // ===== 绘制地面 =====
+                const groundGrad = ctx.createLinearGradient(0, GROUND_Y - 5, 0, H);
+                groundGrad.addColorStop(0, '#2a221c');
+                groundGrad.addColorStop(0.15, '#1e1814');
+                groundGrad.addColorStop(1, '#0f0c0a');
+                ctx.fillStyle = groundGrad;
+                ctx.fillRect(-20, GROUND_Y - 3, W + 40, H - GROUND_Y + 20);
+
+                // 地面纹理线
+                ctx.strokeStyle = 'rgba(60,50,40,0.25)';
+                ctx.lineWidth = 0.5;
+                for (let i = 0; i < 15; i++) {
+                    const y = GROUND_Y + rand(0, H - GROUND_Y);
+                    ctx.beginPath();
+                    ctx.moveTo(0, y + Math.sin(i * 7.3) * 3);
+                    ctx.lineTo(W, y + Math.cos(i * 5.1) * 3);
+                    ctx.stroke();
+                }
+
+                // ===== 绘制弹坑 =====
+                if (craterFormed && explosionTime < explosionDuration) {
+                    const craterSize = clamp(explosionTime * 3.5, 0, 1);
+                    const craterW = 80 * craterSize;
+                    const craterH = 30 * craterSize;
+                    const craterGrad = ctx.createRadialGradient(
+                        EXPLOSION_X, GROUND_Y + 5, 5,
+                        EXPLOSION_X, GROUND_Y + 5, craterW
+                    );
+                    craterGrad.addColorStop(0, 'rgba(5,3,2,0.9)');
+                    craterGrad.addColorStop(0.6, 'rgba(15,10,6,0.7)');
+                    craterGrad.addColorStop(1, 'rgba(30,22,14,0)');
+                    ctx.fillStyle = craterGrad;
+                    ctx.beginPath();
+                    ctx.ellipse(EXPLOSION_X, GROUND_Y + 2, craterW, craterH, 0, 0, Math.PI * 2);
+                    ctx.fill();
+
+                    // 弹坑边缘高光
+                    ctx.strokeStyle = 'rgba(80,55,35,0.35)';
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    ctx.ellipse(EXPLOSION_X, GROUND_Y, craterW * 0.7, craterH * 0.5, 0, 0, Math.PI * 2);
+                    ctx.stroke();
+                }
+
+                // ===== 绘制灰尘粒子 =====
+                for (const dp of dustParticles) {
+                    const alpha = dp.alpha * (1 - dp.age / dp.life);
+                    const grad = ctx.createRadialGradient(dp.x, dp.y, 0, dp.x, dp.y, dp.radius);
+                    grad.addColorStop(0, rgbaStr(dp.color, alpha));
+                    grad.addColorStop(1, rgbaStr(dp.color, 0));
+                    ctx.fillStyle = grad;
+                    ctx.beginPath();
+                    ctx.arc(dp.x, dp.y, dp.radius, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+
+                // ===== 绘制冲击波 =====
+                for (const sw of shockwaves) {
+                    const alpha = sw.alpha * (1 - sw.age / sw.life);
+                    ctx.save();
+                    ctx.globalCompositeOperation = 'lighter';
+                    ctx.strokeStyle = `rgba(255,220,180,${clamp(alpha,0,1)})`;
+                    ctx.lineWidth = Math.max(sw.lineWidth, 0.5);
+                    ctx.shadowColor = `rgba(255,160,80,${clamp(alpha,0,1)})`;
+                    ctx.shadowBlur = 30 * alpha;
+                    ctx.beginPath();
+                    ctx.arc(sw.x, sw.y, sw.radius, 0, Math.PI * 2);
+                    ctx.stroke();
+                    // 内环
+                    ctx.strokeStyle = `rgba(255,255,255,${clamp(alpha*0.5,0,1)})`;
+                    ctx.lineWidth = Math.max(sw.lineWidth * 0.35, 0.3);
+                    ctx.shadowBlur = 15 * alpha;
+                    ctx.beginPath();
+                    ctx.arc(sw.x, sw.y, sw.radius * 0.92, 0, Math.PI * 2);
+                    ctx.stroke();
+                    ctx.restore();
+                }
+
+                // ===== 绘制烟雾粒子 =====
+                ctx.save();
+                ctx.globalCompositeOperation = 'source-over';
+                for (const s of smokeParticles) {
+                    const lifeK = s.age / s.life;
+                    const alpha = s.alpha * (1 - lifeK * 0.85);
+                    const r = s.radius * (1 + lifeK * 1.5);
+                    const grad = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, r);
+                    const darken = 1 - lifeK * 0.4;
+                    grad.addColorStop(0, rgbaStr({
+                        r: Math.floor(s.colorBase.r * darken),
+                        g: Math.floor(s.colorBase.g * darken),
+                        b: Math.floor(s.colorBase.b * darken)
+                    }, alpha));
+                    grad.addColorStop(1, rgbaStr({ r: s.colorBase.r + 30, g: s.colorBase.g + 25, b: s.colorBase.b + 20 }, 0));
+                    ctx.fillStyle = grad;
+                    ctx.beginPath();
+                    ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+                ctx.restore();
+
+                // ===== 绘制火球 =====
+                if (fireballActive && fireballRadius > 5 && explosionTime < 3.5) {
+                    ctx.save();
+                    ctx.globalCompositeOperation = 'lighter';
+
+                    const t = explosionTime;
+                    const baseRadius = fireballRadius;
+
+                    // 火球的多层径向渐变
+                    const layers = [
+                        { r: baseRadius * 0.25, color: 'rgba(255,255,255,0.95)', offset: 0 },
+                        { r: baseRadius * 0.5, color: 'rgba(255,240,180,0.85)', offset: 0.03 },
+                        { r: baseRadius * 0.75, color: 'rgba(255,180,60,0.7)', offset: 0.06 },
+                        { r: baseRadius * 0.95, color: 'rgba(255,100,20,0.5)', offset: 0.1 },
+                        { r: baseRadius * 1.15, color: 'rgba(200,50,10,0.3)', offset: 0.15 },
+                        { r: baseRadius * 1.35, color: 'rgba(120,25,5,0.15)', offset: 0.22 },
+                    ];
+
+                    const timeFactor = clamp(t / 2.5, 0, 1);
+                    const fadeAlpha = 1 - timeFactor * 0.7;
+
+                    for (const layer of layers) {
+                        const cx = EXPLOSION_X + Math.sin(t * 3.1 + layer.offset * 7) * baseRadius * 0.08;
+                        const cy = EXPLOSION_Y + Math.cos(t * 2.7 + layer.offset * 5) * baseRadius * 0.06;
+                        const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, layer.r);
+                        const col = layer.color.replace(/[\d.]+\)$/, (m) => {
+                            const a = parseFloat(m) * fadeAlpha;
+                            return clamp(a, 0, 1) + ')';
+                        });
+                        grad.addColorStop(0, col);
+                        grad.addColorStop(1, 'rgba(0,0,0,0)');
+                        ctx.fillStyle = grad;
+                        ctx.beginPath();
+                        ctx.arc(cx, cy, layer.r, 0, Math.PI * 2);
+                        ctx.fill();
+                    }
+
+                    // 火球内部湍流
+                    if (t < 1.8) {
+                        const turbCount = Math.floor(25 * fadeAlpha);
+                        for (let i = 0; i < turbCount; i++) {
+                            const tx = EXPLOSION_X + (Math.random() - 0.5) * baseRadius * 0.65;
+                            const ty = EXPLOSION_Y + (Math.random() - 0.5) * baseRadius * 0.6;
+                            const tr = rand(4, baseRadius * 0.22);
+                            const heatT = Math.random() * 0.4;
+                            const hc = heatColor(heatT);
+                            const turbGrad = ctx.createRadialGradient(tx, ty, 0, tx, ty, tr);
+                            turbGrad.addColorStop(0, rgbaStr(hc, rand(0.3, 0.7) * fadeAlpha));
+                            turbGrad.addColorStop(1, 'rgba(0,0,0,0)');
+                            ctx.fillStyle = turbGrad;
+                            ctx.beginPath();
+                            ctx.arc(tx, ty, tr, 0, Math.PI * 2);
+                            ctx.fill();
+                        }
+                    }
+
+                    // 火球顶端火焰喷射
+                    if (t < 1.5) {
+                        const flameHeight = baseRadius * (1.2 - t * 0.4);
+                        for (let i = 0; i < 15; i++) {
+                            const fx = EXPLOSION_X + (Math.random() - 0.5) * baseRadius * 0.35;
+                            const fy = EXPLOSION_Y - baseRadius * 0.5 - Math.random() * flameHeight;
+                            const fr = rand(5, baseRadius * 0.3);
+                            const fhc = heatColor(rand(0.05, 0.3));
+                            const fGrad = ctx.createRadialGradient(fx, fy, 0, fx, fy, fr);
+                            fGrad.addColorStop(0, rgbaStr(fhc, rand(0.2, 0.5) * fadeAlpha));
+                            fGrad.addColorStop(1, 'rgba(0,0,0,0)');
+                            ctx.fillStyle = fGrad;
+                            ctx.beginPath();
+                            ctx.arc(fx, fy, fr, 0, Math.PI * 2);
+                            ctx.fill();
+                        }
+                    }
+
+                    ctx.restore();
+                }
+
+                // ===== 绘制火球粒子 =====
+                ctx.save();
+                ctx.globalCompositeOperation = 'lighter';
+                for (const f of fireParticles) {
+                    const lifeK = f.age / f.life;
+                    const alpha = f.alpha * (1 - lifeK * 0.9);
+                    const hc = heatColor(f.colorHeat);
+                    const grad = ctx.createRadialGradient(f.x, f.y, 0, f.x, f.y, f.radius);
+                    grad.addColorStop(0, rgbaStr(hc, alpha));
+                    grad.addColorStop(0.5, rgbaStr(hc, alpha * 0.4));
+                    grad.addColorStop(1, 'rgba(0,0,0,0)');
+                    ctx.fillStyle = grad;
+                    ctx.beginPath();
+                    ctx.arc(f.x, f.y, f.radius, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+                ctx.restore();
+
+                // ===== 绘制碎片 =====
+                ctx.save();
+                for (const d of debris) {
+                    ctx.save();
+                    ctx.translate(d.x, d.y);
+                    ctx.rotate(d.rotation);
+                    const hc = d.color;
+                    ctx.fillStyle = rgbaStr(hc, d.grounded ? 0.4 : 0.85);
+                    ctx.strokeStyle = rgbaStr({ r: Math.floor(hc.r * 0.5), g: Math.floor(hc.g * 0.4), b: Math.floor(hc.b *
+                        0.35) }, 0.5);
+                    ctx.lineWidth = 0.5;
+                    ctx.beginPath();
+                    const verts = d.verts;
+                    for (let v = 0; v < verts.length; v++) {
+                        if (v === 0) ctx.moveTo(verts[v].x, verts[v].y);
+                        else ctx.lineTo(verts[v].x, verts[v].y);
+                    }
+                    ctx.closePath();
+                    ctx.fill();
+                    ctx.stroke();
+
+                    // 碎片尾迹
+                    if (!d.grounded && d.age < 1.5) {
+                        const trailAlpha = 0.3 * (1 - d.age / 1.5);
+                        const trailR = d.size * 0.6;
+                        const trailGrad = ctx.createRadialGradient(-d.vx * 0.04, -d.vy * 0.04, 0, 0, 0, trailR);
+                        trailGrad.addColorStop(0, rgbaStr(hc, trailAlpha));
+                        trailGrad.addColorStop(1, 'rgba(0,0,0,0)');
+                        ctx.fillStyle = trailGrad;
+                        ctx.beginPath();
+                        ctx.arc(-d.vx * 0.04, -d.vy * 0.04, trailR, 0, Math.PI * 2);
+                        ctx.fill();
+                    }
+                    ctx.restore();
+                }
+                ctx.restore();
+
+                // ===== 绘制余烬 =====
+                ctx.save();
+                ctx.globalCompositeOperation = 'lighter';
+                for (const e of embers) {
+                    const lifeK = e.age / e.life;
+                    const flicker = 0.6 + 0.4 * Math.sin(e.age * e.flickerSpeed + e.flickerPhase);
+                    const alpha = flicker * (1 - lifeK * 0.8);
+                    const hc = heatColor(0.1 + lifeK * 0.6);
+                    const r = e.size * (1 - lifeK * 0.4);
+                    const grad = ctx.createRadialGradient(e.x, e.y, 0, e.x, e.y, r);
+                    grad.addColorStop(0, rgbaStr(hc, alpha));
+                    grad.addColorStop(0.6, rgbaStr(hc, alpha * 0.3));
+                    grad.addColorStop(1, 'rgba(0,0,0,0)');
+                    ctx.fillStyle = grad;
+                    ctx.beginPath();
+                    ctx.arc(e.x, e.y, r, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+                ctx.restore();
+
+                // ===== 绘制地面火焰 =====
+                ctx.save();
+                ctx.globalCompositeOperation = 'lighter';
+                for (const g of groundFires) {
+                    const lifeK = g.age / g.life;
+                    const flicker = 0.65 + 0.35 * Math.sin(g.age * g.flickerSpeed + g.flickerPhase);
+                    const alpha = g.baseAlpha * flicker * (1 - lifeK * 0.85);
+                    const r = g.radius * (1 + Math.sin(g.age * g.flickerSpeed * 0.7 + g.flickerPhase) * 0.2);
+                    const hc = heatColor(0.25 + lifeK * 0.55);
+                    const grad = ctx.createRadialGradient(g.x, g.y, 0, g.x, g.y, r);
+                    grad.addColorStop(0, rgbaStr(hc, alpha));
+                    grad.addColorStop(0.5, rgbaStr({ r: 200, g: 60, b: 10 }, alpha * 0.5));
+                    grad.addColorStop(1, 'rgba(0,0,0,0)');
+                    ctx.fillStyle = grad;
+                    ctx.beginPath();
+                    ctx.arc(g.x, g.y, r, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+                ctx.restore();
+
+                // ===== 初始闪光覆盖 =====
+                if (initialFlashIntensity > 0.01) {
+                    ctx.save();
+                    ctx.globalCompositeOperation = 'lighter';
+                    const flashGrad = ctx.createRadialGradient(
+                        EXPLOSION_X, EXPLOSION_Y, 0,
+                        EXPLOSION_X, EXPLOSION_Y, MAX_FIREBALL_RADIUS * 2.5
+                    );
+                    flashGrad.addColorStop(0, `rgba(255,255,255,${clamp(initialFlashIntensity,0,1)})`);
+                    flashGrad.addColorStop(0.3, `rgba(255,240,200,${clamp(initialFlashIntensity*0.7,0,1)})`);
+                    flashGrad.addColorStop(0.7, `rgba(255,180,80,${clamp(initialFlashIntensity*0.3,0,1)})`);
+                    flashGrad.addColorStop(1, 'rgba(0,0,0,0)');
+                    ctx.fillStyle = flashGrad;
+                    ctx.fillRect(-20, -20, W + 40, H + 40);
+                    ctx.restore();
+                }
+
+                // ===== 暖光覆盖 =====
+                if (explosionTime < 3.0 && explosionTime > 0.05) {
+                    const warmAlpha = clamp(1 - explosionTime / 3.0, 0, 1) * 0.35;
+                    ctx.save();
+                    ctx.globalCompositeOperation = 'screen';
+                    const warmGrad = ctx.createRadialGradient(
+                        EXPLOSION_X, EXPLOSION_Y, 0,
+                        EXPLOSION_X, EXPLOSION_Y, MAX_FIREBALL_RADIUS * 2
+                    );
+                    warmGrad.addColorStop(0, `rgba(255,160,50,${warmAlpha})`);
+                    warmGrad.addColorStop(0.5, `rgba(255,80,20,${warmAlpha*0.5})`);
+                    warmGrad.addColorStop(1, 'rgba(0,0,0,0)');
+                    ctx.fillStyle = warmGrad;
+                    ctx.fillRect(-20, -20, W + 40, H + 40);
+                    ctx.restore();
+                }
+
+                ctx.restore(); // 恢复屏幕震动偏移
+            }
+
+            // ==================== 主循环 ====================
+            let lastTime = performance.now();
+            let frameCount = 0;
+
+            function gameLoop(currentTime) {
+                const dt = Math.min((currentTime - lastTime) / 1000, 0.1);
+                lastTime = currentTime;
+                frameCount++;
+
+                // 更新
+                updateExplosion(dt);
+
+                // 渲染
+                renderExplosion();
+
+                // 暖光更新
+                if (explosionTime < 3.0) {
+                    warmGlow.style.opacity = clamp(1 - explosionTime / 3.0, 0, 1);
+                } else {
+                    warmGlow.style.opacity = 0;
+                }
+
+                requestAnimationFrame(gameLoop);
+            }
+
+            // ==================== 启动 ====================
+            function startExplosion() {
+                // 初始化音频（尝试）
+                initAudio();
+
+                // 立即触发爆炸
+                triggerExplosion();
+
+                // 开始动画循环
+                requestAnimationFrame((t) => {
+                    lastTime = t;
+                    requestAnimationFrame(gameLoop);
+                });
+
+                // 设置用户交互监听（用于音频恢复和次级爆炸）
+                const handleFirstInteraction = () => {
+                    if (!audioCtx || audioCtx.state === 'suspended') {
+                        if (audioCtx) {
+                            audioCtx.resume().then(() => {
+                                if (!secondaryBoomDone) {
+                                    triggerSecondaryExplosion();
+                                }
+                            }).catch(() => {});
+                        } else {
+                            initAudio();
+                            if (audioCtx && audioCtx.state === 'suspended') {
+                                audioCtx.resume().then(() => {
+                                    if (!secondaryBoomDone) {
+                                        triggerSecondaryExplosion();
+                                    }
+                                }).catch(() => {});
+                            } else {
+                                if (!secondaryBoomDone) {
+                                    triggerSecondaryExplosion();
+                                }
+                            }
+                        }
+                    } else if (audioCtx && audioCtx.state === 'running') {
+                        // 音频已经运行，不需要额外操作
+                    }
+
+                    // 移除监听器
+                    document.removeEventListener('click', handleFirstInteraction);
+                    document.removeEventListener('touchstart', handleFirstInteraction);
+                    document.removeEventListener('keydown', handleFirstInteraction);
+                };
+
+                document.addEventListener('click', handleFirstInteraction);
+                document.addEventListener('touchstart', handleFirstInteraction);
+                document.addEventListener('keydown', handleFirstInteraction);
+            }
+
+            // 页面加载后立即启动
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', () => {
+                    setTimeout(startExplosion, 60);
+                });
+            } else {
+                setTimeout(startExplosion, 60);
+            }
+
+            // 窗口大小变化时更新
+            window.addEventListener('resize', () => {
+                resizeCanvas();
+                // 更新地面和爆炸位置（简化：保持相对位置）
+            });
+
+            console.log('💥 炸弹已就绪 - 打开页面即爆炸！');
+        })();
+    </script>
+</body>
+</html>
